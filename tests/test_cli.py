@@ -1,13 +1,16 @@
 """python -m local_laws end to end on the fixtures: exit codes, what is written, and what is refused."""
 
 import copy
+import datetime
 import hashlib
 import itertools
 import json
 import os
+from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from conftest import CODE, NY_SAMPLE, FakeFetcher, FakeNYApi, fake_locus_download, nfip_snapshot, rezipped
 from local_laws import census, cli, locus, nfip, nyindex, nylaws, tribes
@@ -277,6 +280,60 @@ def test_check_pins_accepts_the_current_pins(offline, monkeypatch, capsys):
     assert "bia_notices" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("hours, status, code", [(1, "unverified", 0), (nfip.MAX_UNVERIFIED_HOURS, "stale", 1)])
+def test_check_freshness_alerts_when_fema_is_unreadable_and_its_reading_ages(published, offline, monkeypatch, capsys, hours, status, code):
+    store, manifest = published
+    read = manifest["sources"]["nfip_communities"]["retrieved_at"]
+    checked = datetime.datetime.fromisoformat(read) + datetime.timedelta(hours=hours)
+    monkeypatch.setattr(nfip, "now", lambda: checked.isoformat())
+    monkeypatch.setattr(cli, "Fetcher", lambda: FakeFetcher({nfip.CSV_URL: fema_403()}))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert run("check-freshness", "--local", str(store.root)) == code
+    out = capsys.readouterr().out
+    report, _ = json.JSONDecoder().raw_decode(out)
+    assert report["status"] == status and "HTTPStatusError" in report["unreadable"]
+    assert f"::{'error' if code else 'warning'}::FEMA freshness is unverified" in out
+    assert report["retrieved_at"] == read
+
+
+def test_check_freshness_accepts_live_matches_even_when_the_stored_reading_is_old(published, offline, monkeypatch, capsys):
+    store, _ = published
+    before = store.read_text(MANIFEST)
+    monkeypatch.setattr(nfip, "now", lambda: "2026-10-06T12:00:00Z")
+    assert run("check-freshness", "--local", str(store.root)) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "current" and report["problems"] == []
+    assert store.read_text(MANIFEST) == before
+
+
+def test_check_freshness_fails_for_changed_source_bytes(published, offline, monkeypatch, capsys):
+    store, _ = published
+    monkeypatch.setattr(nfip, "now", lambda: "2026-10-06T12:00:00Z")
+    original = cli.nfip_head
+    monkeypatch.setattr(cli, "nfip_head", lambda fetcher: dict(original(fetcher), api_sha256="changed"))
+    assert run("check-freshness", "--local", str(store.root)) == 1
+    report, _ = json.JSONDecoder().raw_decode(capsys.readouterr().out)
+    assert report["status"] == "changed" and report["problems"]
+
+
+def test_check_freshness_cannot_succeed_without_a_published_reading(tmp_path, offline, capsys):
+    assert run("check-freshness", "--local", str(tmp_path)) == 1
+    report, _ = json.JSONDecoder().raw_decode(capsys.readouterr().out)
+    assert report["status"] == "unknown" and report["problems"]
+
+
+def test_freshness_runs_after_publishing_even_if_an_earlier_check_failed():
+    workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / ".github/workflows/pipeline.yml").read_text())
+    steps = workflow["jobs"]["sync"]["steps"]
+    freshness_index = next(i for i, step in enumerate(steps) if step.get("name") == "Check FEMA freshness")
+    assert freshness_index > next(i for i, step in enumerate(steps) if step.get("name") == "Check reviewed source pins")
+    step = steps[freshness_index]
+    assert step["if"] == "${{ !inputs.args && !cancelled() }}"
+    assert "set -o pipefail" in step["run"] and "python -m local_laws check-freshness | tee freshness.json" in step["run"]
+    summary = next(step for step in steps if step.get("name") == "Summary")
+    assert summary["if"] == "${{ !cancelled() }}" and "verify pins freshness" in summary["run"]
+
+
 def test_no_trusted_publisher_message_is_a_github_actions_error(monkeypatch, capsys):
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     assert cli.trusted_publisher_error(RuntimeError("invalid_grant: No trusted publisher configured"), "owner/data") is True
@@ -376,6 +433,11 @@ def test_a_run_fema_refuses_builds_the_fema_table_from_the_stored_files_and_new_
     assert run("verify", "--local", str(out)) == 0, "verify checks the rows against the stored report when fema.gov refuses it too"
     report = json.loads(capsys.readouterr().out)
     assert (report["problems"], report["nfip_snapshot"], report["nfip_report"]["same_file"]) == ([], {"same_file": True, "rows": 25}, None)
+    monkeypatch.setattr(nfip, "now", lambda: "2026-10-06T12:00:00Z")
+    assert run("check-freshness", "--local", str(out)) == 1
+    freshness, _ = json.JSONDecoder().raw_decode(capsys.readouterr().out)
+    assert freshness["status"] == "stale"
+    assert json.loads((out / MANIFEST).read_text()) == after, "the final freshness alert does not roll back the New York update"
 
 
 @pytest.mark.parametrize("changes, relist, stop", [

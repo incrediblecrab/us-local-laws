@@ -31,6 +31,8 @@ CRS_SAYS = "a voluntary incentive program that recognizes and encourages communi
 REUSE_SAYS = "Most material on FEMA.gov is free of copyright and may be copied and distributed without permission."
 # Where each build stores the two files it read from fema.gov, as harvest-nfip saves them, so that a run fema.gov refuses can build the table from them again; see cli.read_fema.
 SNAPSHOT = "sources/nfip_snapshot.zip"
+# Allow four scheduled refresh opportunities before an unreadable source fails the final freshness check.
+MAX_UNVERIFIED_HOURS = 48
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 OPENFEMA_STATEMENT = "This product uses the Federal Emergency Management Agency’s OpenFEMA API, but is not endorsed by FEMA. The Federal Government or FEMA cannot vouch for the data or analyses derived from these data after the data have been retrieved from the Agency's website(s)."
 # The report's header, and the one that begins its part for communities not participating, where the eighth column gives the sanction's date instead.
@@ -250,6 +252,36 @@ def reconcile(table, data):
 
 def now():
     return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def freshness(source, head, checked_at=None):
+    checked_at = checked_at or now()
+    checked = datetime.datetime.fromisoformat(checked_at)
+    readings = {"retrieved_at": source.get("retrieved_at"), "api_retrieved_at": (source.get("api") or {}).get("retrieved_at")}
+    ages, problems = [], []
+    for name, value in readings.items():
+        try:
+            read = datetime.datetime.fromisoformat(value)
+            if read.tzinfo is None or read > checked:
+                raise ValueError("reading must have a timezone and must not be in the future")
+        except (TypeError, ValueError):
+            problems.append(f"FEMA {name} is missing or invalid: {value!r}")
+        else:
+            ages.append((checked - read).total_seconds() / 3600)
+    age = max(ages) if len(ages) == len(readings) else None
+    if problems:
+        status = "unknown"
+    elif head is not None:
+        changed = source.get("sha256") != head["sha256"] or (source.get("api") or {}).get("sha256") != head["api_sha256"]
+        status = "changed" if changed else "current"
+        if changed:
+            problems.append("Published FEMA files differ from the live source; a refresh is still needed.")
+    elif age >= MAX_UNVERIFIED_HOURS:
+        status = "stale"
+        problems.append(f"FEMA freshness is unverified and the oldest published source reading is {age:.1f} hours old (limit {MAX_UNVERIFIED_HOURS} hours). New York updates are independent; restore supported FEMA access to refresh this source.")
+    else:
+        status = "unverified"
+    return {"status": status, "checked_at": checked_at, **readings, "age_hours": age, "max_unverified_hours": MAX_UNVERIFIED_HOURS, "problems": problems}
 
 
 def harvest(fetcher):

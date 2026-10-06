@@ -64,10 +64,15 @@ jobs:
         run: |
           set -o pipefail
           python -m local_laws check-pins | tee pins.json
+      - name: Check FEMA freshness
+        if: ${{ !inputs.args && !cancelled() }}
+        run: |
+          set -o pipefail
+          python -m local_laws check-freshness | tee freshness.json
       - name: Summary
         if: ${{ !cancelled() }}
         run: |
-          for step in probe run verify pins; do
+          for step in probe run verify pins freshness; do
             if [ -s "$step.json" ]; then { echo "### $step"; echo '```json'; cat "$step.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"; fi
           done
 

@@ -37,6 +37,8 @@ GitHub Actions runs at 00:00 and 12:00 UTC. Each scheduled run first probes with
 
 **Reading run status:** the probe reports New York and FEMA separately, including the reading dates from the published manifest. A refused FEMA request gives `status: degraded` and says its freshness is unverified, even when New York is unchanged and no build is needed. It does not block a New York update. The dataset card puts those stored reading dates under Source freshness; they are not the time of the latest probe. A green workflow alone does not establish that FEMA is current, and this reporting change does not remove fema.gov's refusal. The FEMA parser skips full-width CSV records containing only whitespace, while retaining the original record numbers and continuing to reject malformed records and disagreements with OpenFEMA.
 
+**Freshness alert:** `python -m local_laws check-freshness` runs after publishing, verification and the pin check, even when a previous check failed or the probe skipped the build. It compares both published FEMA file hashes with a fresh read. Matching hashes establish that the stored files are current without changing their recorded reading dates; differing hashes fail the check. If FEMA cannot be read, the check warns while both stored readings are younger than `MAX_UNVERIFIED_HOURS` in `local_laws/nfip.py`, and fails once either reaches that limit. Missing, invalid or future reading dates also fail. The report appears in the Actions summary as `freshness`. This final alert does not roll back or prevent New York updates, and does not bypass FEMA's access restrictions.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).

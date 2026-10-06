@@ -14,6 +14,10 @@ REPO = Path(__file__).resolve().parents[1]
 IGNORE = shutil.ignore_patterns("__pycache__")
 # (module, what the mutation breaks, code to replace, replacement). Each code string must occur exactly once in its module.
 MUTATIONS = [
+    ("nfip.py", "freshness: overdue readings never alert", "elif age >= MAX_UNVERIFIED_HOURS:", "elif False:"),
+    ("nfip.py", "freshness: exact age limit is allowed", "elif age >= MAX_UNVERIFIED_HOURS:", "elif age > MAX_UNVERIFIED_HOURS:"),
+    ("nfip.py", "freshness: newer reading hides stale peer", "age = max(ages) if len(ages) == len(readings) else None", "age = min(ages) if len(ages) == len(readings) else None"),
+    ("nfip.py", "freshness: source drift ignored", 'status = "changed" if changed else "current"', 'changed = False\n        status = "current"'),
     ("census.py", "compare: never reports", "if counts.get((state, kind), 0) != expected]", "if False]"),
     ("census.py", "parse_units: duplicates allowed", "    if duplicates:\n        raise SourceChanged(f\"duplicate census ids", "    if False:\n        raise SourceChanged(f\"duplicate census ids"),
     ("census.py", "check_sha256: no pin", "    if actual != expected:\n", "    if False:\n"),
@@ -233,6 +237,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="local-laws-mutate-") as scratch:
         copy = Path(scratch).resolve()
         shutil.copytree(REPO / "tests", copy / "tests", ignore=IGNORE)
+        shutil.copytree(REPO / ".github", copy / ".github")
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(copy))
         for module, label, old, new in MUTATIONS:
             shutil.rmtree(copy / "local_laws", ignore_errors=True)

@@ -35,6 +35,41 @@ def api_edited(edit):
     return out.getvalue()
 
 
+@pytest.mark.parametrize("seconds, status", [(-1, "unverified"), (0, "stale"), (1, "stale")])
+def test_freshness_alert_begins_at_the_exact_age_limit(seconds, status):
+    read = datetime.datetime(2026, 10, 4, tzinfo=datetime.UTC)
+    source = {"retrieved_at": read.isoformat(), "api": {"retrieved_at": read.isoformat()}}
+    checked = read + datetime.timedelta(hours=nfip.MAX_UNVERIFIED_HOURS, seconds=seconds)
+    report = nfip.freshness(source, None, checked.isoformat())
+    assert report["status"] == status
+    assert bool(report["problems"]) == (status == "stale")
+    assert report["age_hours"] == nfip.MAX_UNVERIFIED_HOURS + seconds / 3600
+
+
+def test_live_matching_hashes_establish_freshness_without_rewriting_reading_dates():
+    source = {"retrieved_at": "2026-09-26T08:18:00Z", "sha256": "csv", "api": {"retrieved_at": "2026-09-26T08:23:00Z", "sha256": "api"}}
+    head = {"sha256": "csv", "api_sha256": "api"}
+    report = nfip.freshness(source, head, "2026-10-06T12:00:00Z")
+    assert report["status"] == "current" and report["problems"] == []
+    assert report["retrieved_at"] == source["retrieved_at"] and report["age_hours"] > nfip.MAX_UNVERIFIED_HOURS
+    for key in head:
+        changed = nfip.freshness(source, dict(head, **{key: "changed"}), "2026-10-06T12:00:00Z")
+        assert changed["status"] == "changed" and changed["problems"]
+
+
+def test_freshness_uses_the_older_of_the_two_source_readings():
+    source = {"retrieved_at": "2026-10-06T08:18:00Z", "api": {"retrieved_at": "2026-09-26T08:23:00Z"}}
+    assert nfip.freshness(source, None, "2026-10-06T12:00:00Z")["status"] == "stale"
+
+
+@pytest.mark.parametrize("value", [None, "", "not a date", "2026-10-06T08:18:00", "2026-10-07T00:00:00Z"])
+@pytest.mark.parametrize("field", ["csv", "api"])
+def test_missing_invalid_naive_or_future_readings_cannot_pass_freshness(value, field):
+    source = {"retrieved_at": value if field == "csv" else "2026-10-06T08:18:00Z", "api": {"retrieved_at": value if field == "api" else "2026-10-06T08:23:00Z"}}
+    report = nfip.freshness(source, None, "2026-10-06T12:00:00Z")
+    assert report["status"] == "unknown" and report["age_hours"] is None and report["problems"]
+
+
 def line(text):
     """The sample's one line holding text."""
     found = [each for each in NFIP_CSV.decode("utf-8").splitlines() if text in each]

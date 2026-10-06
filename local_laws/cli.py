@@ -270,6 +270,29 @@ def cmd_check_pins(args):
         warn(problem, level="error")
     return 1 if problems else 0
 
+def cmd_check_freshness(args):
+    store = open_store(args)
+    text = store.read_text(MANIFEST)
+    manifest = json.loads(text) if text else {}
+    source = (manifest.get("sources") or {}).get("nfip_communities") or {}
+    head, unreadable = None, None
+    fetcher = Fetcher()
+    try:
+        head = nfip_head(fetcher)
+    except (Blocked, Unavailable, httpx.HTTPStatusError, httpx.TransportError) as error:
+        unreadable = f"{type(error).__name__}: {error}"
+    finally:
+        fetcher.close()
+    report = nfip.freshness(source, head)
+    if unreadable:
+        report["unreadable"] = unreadable
+    print(json.dumps(report, indent=1))
+    for problem in report["problems"]:
+        warn(problem, level="error")
+    if report["status"] == "unverified":
+        warn(f"FEMA freshness is unverified; the oldest published source reading is {report['age_hours']:.1f} hours old, below the {report['max_unverified_hours']}-hour alert limit.")
+    return 1 if report["problems"] else 0
+
 def cmd_verify(args):
     from .verify import verify
 
@@ -363,6 +386,7 @@ def main(argv=None):
 
     add("probe", cmd_probe, "cheaply decide whether New York, FEMA or the dataset card changed")
     add("check-pins", cmd_check_pins, "fail if a manually pinned source has a newer release to review")
+    add("check-freshness", cmd_check_freshness, "check published FEMA files against the live source; fail if changed or unreadable beyond the stored-reading age limit")
     run = add("run", cmd_run, "download the sources, check them, build the tables and commit them with the manifest and card")
     run.add_argument("--workdir", help="keep scratch files here (default: a temporary directory, deleted afterwards); LOCUS's download needs about 2 GB")
     run.add_argument("--ny-snapshot", help="build New York's table from a snapshot harvest-ny wrote, instead of reading the API again (about 1,500 requests)")
