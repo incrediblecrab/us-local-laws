@@ -33,7 +33,7 @@ def open_store(args, write=False):
         return LocalStore(args.local)
     if write and os.environ.get("GITHUB_ACTIONS") == "true":
         os.environ.setdefault("HF_OIDC_RESOURCE", f"datasets/{args.repo}")
-    return HubStore(args.repo, token=None if write else False, create=write)
+    return HubStore(args.repo, token=None if write else False, create=write, tolerate=(nfip.HARVEST,))
 
 def github_output(**values):
     path = os.environ.get("GITHUB_OUTPUT")

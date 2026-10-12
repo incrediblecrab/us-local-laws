@@ -233,8 +233,8 @@ def test_github_actions_writes_set_the_hugging_face_oidc_resource(monkeypatch):
         local = None
         repo = "owner/data"
 
-    def hub(repo, token=None, create=False):
-        seen.update(repo=repo, token=token, create=create, oidc=os.environ.get("HF_OIDC_RESOURCE"))
+    def hub(repo, token=None, create=False, tolerate=()):
+        seen.update(repo=repo, token=token, create=create, tolerate=tolerate, oidc=os.environ.get("HF_OIDC_RESOURCE"))
         raise RuntimeError("stop before network")
 
     monkeypatch.setattr(cli, "HubStore", hub)
@@ -242,7 +242,7 @@ def test_github_actions_writes_set_the_hugging_face_oidc_resource(monkeypatch):
     monkeypatch.delenv("HF_OIDC_RESOURCE", raising=False)
     with pytest.raises(RuntimeError):
         cli.open_store(Args, write=True)
-    assert seen == {"repo": "owner/data", "token": None, "create": True, "oidc": "datasets/owner/data"}
+    assert seen == {"repo": "owner/data", "token": None, "create": True, "tolerate": (nfip.HARVEST,), "oidc": "datasets/owner/data"}
 
 
 def test_reads_do_not_request_an_oidc_token_in_github_actions(monkeypatch):
@@ -252,7 +252,7 @@ def test_reads_do_not_request_an_oidc_token_in_github_actions(monkeypatch):
         local = None
         repo = "owner/data"
 
-    def hub(repo, token=None, create=False):
+    def hub(repo, token=None, create=False, tolerate=()):
         seen.update(token=token, create=create, oidc=os.environ.get("HF_OIDC_RESOURCE"))
         raise RuntimeError("stop before network")
 
@@ -543,3 +543,13 @@ def test_probe_compares_a_newer_harvest_when_fema_refuses(published, offline, mo
     report = output_json(capsys.readouterr().out)
     assert (report["needed"], report["sources"]["nfip"]["status"]) == (needed, status)
     assert (report["head"]["nfip"] or {}).get("via") == (nfip.HARVEST if status != "unavailable" else None)
+
+
+def test_the_test_workflow_runs_the_suite_and_cannot_publish():
+    workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / ".github/workflows/test.yml").read_text())
+    triggers = workflow.get("on", workflow.get(True))  # PyYAML reads the key `on` as True
+    assert set(triggers) == {"push", "pull_request"} and triggers["push"] == {"branches": ["main"]}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert all("permissions" not in job for job in workflow["jobs"].values()), "no job widens the read-only token, and none asks for an OIDC token"
+    runs = [step["run"] for job in workflow["jobs"].values() for step in job["steps"] if "run" in step]
+    assert runs == ['pip install -q ".[test]"', "python -m pytest -q"]

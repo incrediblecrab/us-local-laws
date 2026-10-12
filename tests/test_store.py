@@ -31,6 +31,7 @@ class FakeApi:
         self.commits = 0
         self.failures = []
         self.calls = []
+        self.history = {self.head: dict(self.files)}
 
     @property
     def head(self):
@@ -59,11 +60,17 @@ class FakeApi:
         for operation in operations:
             self.files[operation.path_in_repo] = Path(operation.path_or_fileobj).read_bytes()
         self.commits += 1
+        self.history[self.head] = dict(self.files)
         return self.head
 
     def other_writer(self, path=MANIFEST, data=b'{"other": true}\n'):
         self.files[path] = data
         self.commits += 1
+        self.history[self.head] = dict(self.files)
+
+    def list_repo_tree(self, repo_id, recursive, repo_type, revision):
+        self.calls.append("list_repo_tree")
+        return [SimpleNamespace(path=path, blob_id=git_blob_sha1(data)) for path, data in sorted(self.history[revision].items())]
 
     def get_paths_info(self, repo_id, paths, repo_type, revision):
         self.calls.append("get_paths_info")
@@ -196,3 +203,35 @@ def test_a_published_build_verifies_through_the_hub_store(published, tmp_path):
     shutil.rmtree(tmp_path / "work", ignore_errors=True)
     problems = verify(HubStore("x/y", api=api))["problems"]
     assert any(problem.startswith("data/governments.parquet has SHA-256") for problem in problems), problems
+
+
+def test_a_commit_goes_on_top_of_another_writer_that_changed_only_a_tolerated_path(tmp_path):
+    api = FakeApi({MANIFEST: b'{"build": 0}\n'})
+    hub = HubStore("x/y", api=api, tolerate=("sources/harvest.zip",))
+    api.other_writer("sources/harvest.zip", b"newer reading")
+    assert hub.commit(local_files(tmp_path), "build") == "commit-2" == hub.revision
+    assert (api.files[MANIFEST], api.files["sources/harvest.zip"]) == (b'{"build": 1}\n', b"newer reading"), "both writers' work stands"
+
+
+@pytest.mark.parametrize("others", [
+    [("sources/harvest.zip", b"newer reading"), (MANIFEST, b'{"other": true}\n')],
+    [(MANIFEST, b'{"other": true}\n')],
+])
+def test_another_writer_that_changed_more_than_a_tolerated_path_still_supersedes(tmp_path, others):
+    api = FakeApi({MANIFEST: b'{"build": 0}\n'})
+    hub = HubStore("x/y", api=api, tolerate=("sources/harvest.zip",))
+    for path, data in others:
+        api.other_writer(path, data)
+    with pytest.raises(Superseded):
+        hub.commit(local_files(tmp_path), "build")
+    assert api.files[MANIFEST] == b'{"other": true}\n'
+
+
+def test_a_commit_that_writes_a_tolerated_path_is_superseded_by_any_other_writer(tmp_path):
+    api = FakeApi()
+    hub = HubStore("x/y", api=api, tolerate=("sources/harvest.zip",))
+    api.other_writer("sources/harvest.zip", b"newer reading")
+    (tmp_path / "h.zip").write_bytes(b"mine")
+    with pytest.raises(Superseded):
+        hub.commit({"sources/harvest.zip": str(tmp_path / "h.zip")}, "harvest")
+    assert api.files["sources/harvest.zip"] == b"newer reading"

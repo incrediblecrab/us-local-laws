@@ -90,11 +90,12 @@ class LocalStore:
 
 
 class HubStore:
-    """token=False reads anonymously (the dataset is public). create=True makes the public repo first if it does not exist."""
+    """token=False reads anonymously (the dataset is public). create=True makes the public repo first if it does not exist. A commit by another writer that changed only paths in tolerate, which this store never writes, does not supersede it: its commit goes on top."""
 
-    def __init__(self, repo_id, token=None, api=None, create=False):
+    def __init__(self, repo_id, token=None, api=None, create=False, tolerate=()):
         self.repo_id = repo_id
         self.api = api or HfApi(token=token)
+        self.tolerate = frozenset(tolerate)
         if create:
             self.api.create_repo(repo_id, repo_type="dataset", private=False, exist_ok=True)
         self.revision = self.api.dataset_info(repo_id).sha
@@ -150,6 +151,11 @@ class HubStore:
                     if oid:
                         log.warning("commit %r had already landed as %s", message[:60], oid[:12])
                         break
+                    head = self._tolerated_head(files)
+                    if head and attempt < COMMIT_ATTEMPTS - 1:
+                        log.warning("%s changed only %s since %s; committing on top of %s", self.repo_id, sorted(self.tolerate), self.revision[:12], head[:12])
+                        self.revision = head
+                        continue
                     self.superseded = Superseded(f"{self.repo_id} has a commit this run did not write (its last commit was {self.revision[:12]})")
                     raise self.superseded from None
                 if attempt == COMMIT_ATTEMPTS - 1 or (http and status not in RETRYABLE):
@@ -158,6 +164,18 @@ class HubStore:
                 time.sleep(60 * (attempt + 1))
         self.revision = oid
         return oid
+
+    def _tree(self, revision):
+        return {entry.path: getattr(entry, "blob_id", None) for entry in self.api.list_repo_tree(self.repo_id, recursive=True, repo_type="dataset", revision=revision) if hasattr(entry, "blob_id")}
+
+    def _tolerated_head(self, files):
+        """The head commit if every change since this store's revision is to a tolerated path that this commit does not write, else None."""
+        if not self.tolerate or self.tolerate & set(files):
+            return None
+        head = self.api.dataset_info(self.repo_id).sha
+        before, after = self._tree(self.revision), self._tree(head)
+        changed = {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)}
+        return head if changed and changed <= self.tolerate else None
 
     def _landed(self, manifest):
         """The head commit if it already holds exactly this manifest, else None."""
