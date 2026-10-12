@@ -1,6 +1,6 @@
 # workflows
 
-**Objective:** keep the Hugging Face dataset current with no personal device and no stored Hugging Face token. The workflow runs at 00:00 and 12:00 UTC.
+**Objective:** keep the Hugging Face dataset current with no personal device and no stored Hugging Face token. The workflow runs at 14:00 UTC (9:00 EST, 10:00 EDT).
 
 **Inputs:** GitHub's OIDC token, which Hugging Face exchanges for a one-hour dataset-scoped write token when the Hub dataset has this repository, branch and `pipeline.yml` registered as a Trusted Publisher. No `HF_TOKEN` secret is used.
 

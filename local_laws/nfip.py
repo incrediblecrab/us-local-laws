@@ -33,7 +33,7 @@ REUSE_SAYS = "Most material on FEMA.gov is free of copyright and may be copied a
 SNAPSHOT = "sources/nfip_snapshot.zip"
 # Where `harvest-nfip --publish`, run on a machine fema.gov answers, stores a newer reading for a run fema.gov refuses to build from; the build checks it as it checks any harvest, then stores it as SNAPSHOT.
 HARVEST = "sources/nfip_harvest.zip"
-# Allow four scheduled refresh opportunities before an unreadable source fails the final freshness check.
+# Allow two daily scheduled runs before an unreadable source fails the final freshness check.
 MAX_UNVERIFIED_HOURS = 48
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 OPENFEMA_STATEMENT = "This product uses the Federal Emergency Management Agency’s OpenFEMA API, but is not endorsed by FEMA. The Federal Government or FEMA cannot vouch for the data or analyses derived from these data after the data have been retrieved from the Agency's website(s)."
