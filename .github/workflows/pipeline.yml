@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The full live path is about 30 minutes of New York pacing, 15 seconds of FEMA pacing, large pinned downloads, upload, verify and margins.
     timeout-minutes: 180
     permissions:
@@ -79,7 +79,7 @@ jobs:
   # GitHub disables schedules in a public repository after 60 days without repository activity. This job makes no keepalive commit: GitHub Trust & Safety disabled a keepalive project for circumventing that policy (https://github.com/ddev/github-action-add-on-test/issues/46). Instead it fails once the last commit is 50 days old, so GitHub notifies the user who last changed the cron, who can push a real commit. It runs on every scheduled run, because GitHub can start scheduled runs late or drop them. The log names the schedule that started the run.
   inactivity:
     if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
