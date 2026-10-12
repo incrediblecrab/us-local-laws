@@ -1,6 +1,7 @@
-"""python -m local_laws {run,verify,card,harvest-ny,harvest-nfip}: build the dataset and publish it, check what is published, re-render its card, or read New York's local-law filings or FEMA's Community Status Book into a snapshot to build from."""
+"""python -m local_laws {run,verify,card,harvest-ny,harvest-nfip}: build the dataset and publish it, check what is published, re-render its card, or read New York's local-law filings or FEMA's Community Status Book into a snapshot to build from, which harvest-nfip --publish also stores in the dataset."""
 
 import argparse
+import datetime
 import hashlib
 import json
 import logging
@@ -8,6 +9,7 @@ import os
 import shutil
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -105,17 +107,44 @@ def stored_nfip_snapshot(store):
     return snapshot
 
 
+def harvested_nfip_snapshot(store):
+    """The reading `harvest-nfip --publish` stored from a machine fema.gov answers; None if there is none. The build checks its rows as it checks any harvest."""
+    data = store.read_bytes(nfip.HARVEST)
+    if data is None:
+        return None
+    try:
+        return nfip.load(data)
+    except (zipfile.BadZipFile, KeyError, ValueError) as error:
+        raise SourceChanged(f"{nfip.HARVEST} cannot be read as a snapshot: {type(error).__name__}: {error}") from None
+
+
+def harvest_age_hours(snapshot, checked_at):
+    """Hours from the older of the harvest's two readings to checked_at."""
+    checked = datetime.datetime.fromisoformat(checked_at)
+    return max((checked - datetime.datetime.fromisoformat(snapshot[key])).total_seconds() / 3600 for key in ("retrieved_at", "api_retrieved_at"))
+
+
+def snapshot_head(snapshot):
+    """The probe's FEMA head for a snapshot's files."""
+    return {"sha256": hashlib.sha256(snapshot["csv"]).hexdigest(), "bytes": len(snapshot["csv"]), "api_sha256": hashlib.sha256(snapshot["api"]).hexdigest(), "api_bytes": len(snapshot["api"]), "via": nfip.HARVEST, "retrieved_at": snapshot["retrieved_at"]}
+
+
 def read_fema(fetcher, store):
-    """FEMA's two files as fema.gov serves them now. When fema.gov refuses, as it refused GitHub-hosted runners on September 27, 2026, the files the published build read and stored, so that New York's filings still update and the FEMA table stays as published; with no stored files the error propagates, and nothing is written."""
+    """FEMA's two files as fema.gov serves them now. When fema.gov refuses, as it refused GitHub-hosted runners on September 27, 2026, the newer of the files the published build read and stored and the files `harvest-nfip --publish` stored from a machine fema.gov answers, so that New York's filings still update and the FEMA table stays as fresh as the latest reading; with neither the error propagates, and nothing is written."""
     try:
         return nfip.harvest(fetcher)
     except (Blocked, Unavailable, httpx.HTTPStatusError) as error:
         stored = stored_nfip_snapshot(store)
-        if stored is None:
+        harvested = harvested_nfip_snapshot(store)
+        if harvested is not None and (stored is None or harvested["retrieved_at"] > stored["retrieved_at"]):
+            chosen, path = harvested, nfip.HARVEST
+        elif stored is not None:
+            chosen, path = stored, nfip.SNAPSHOT
+        else:
             raise
         refused = f"GET {error.request.url} returned HTTP {http_status(error)} with headers {response_headers(error)}" if isinstance(error, httpx.HTTPStatusError) else f"{type(error).__name__}: {error}"
-        warn(f"FEMA's Community Status Book could not be read: {refused}. Building nfip_communities from {nfip.SNAPSHOT}, FEMA's files as read on {stored['retrieved_at']}.")
-        return stored
+        warn(f"FEMA's Community Status Book could not be read: {refused}. Building nfip_communities from {path}, FEMA's files as read on {chosen['retrieved_at']}.")
+        return chosen
 
 def publishable(args):
     """The code version to record, or None when writing to the Hub from code that is not committed: a published build names the commit that made it."""
@@ -236,7 +265,12 @@ def cmd_probe(args):
         except (Blocked, Unavailable, httpx.HTTPStatusError, httpx.TransportError) as error:
             head["nfip"] = None
             last = source_readings(manifest)["nfip"] or "unknown"
-            warn(f"FEMA probe skipped: {type(error).__name__}: {error}. Last successful FEMA fetch in the published manifest: {last}. FEMA freshness is unverified.")
+            harvested = harvested_nfip_snapshot(store)
+            if harvested is not None and harvested["retrieved_at"] > last:
+                head["nfip"] = snapshot_head(harvested)
+                warn(f"FEMA probe could not read fema.gov: {type(error).__name__}: {error}. Comparing the published files with {nfip.HARVEST}, FEMA's files as read on {harvested['retrieved_at']}.")
+            else:
+                warn(f"FEMA probe skipped: {type(error).__name__}: {error}. Last successful FEMA fetch in the published manifest: {last}. FEMA freshness is unverified.")
     except (SourceChanged, Blocked, Unavailable, httpx.HTTPStatusError, httpx.TransportError) as error:
         warn(f"probe could not prove the dataset is current: {type(error).__name__}: {error}")
         github_output(needed="true", card_only="false")
@@ -283,9 +317,15 @@ def cmd_check_freshness(args):
         unreadable = f"{type(error).__name__}: {error}"
     finally:
         fetcher.close()
-    report = nfip.freshness(source, head)
+    harvested = harvested_nfip_snapshot(store) if head is None else None
+    checked_at = nfip.now()
+    if harvested is not None and harvest_age_hours(harvested, checked_at) < nfip.MAX_UNVERIFIED_HOURS:
+        head = snapshot_head(harvested)
+    report = nfip.freshness(source, head, checked_at)
     if unreadable:
         report["unreadable"] = unreadable
+    if head is not None and head.get("via"):
+        report["verified_by"] = {"path": head["via"], "retrieved_at": head["retrieved_at"]}
     print(json.dumps(report, indent=1))
     for problem in report["problems"]:
         warn(problem, level="error")
@@ -369,7 +409,15 @@ def cmd_harvest_nfip(args):
     finally:
         fetcher.close()
     nfip.save(snapshot, args.out)
-    print(json.dumps({"out": args.out, "rows": len(table), "api_rows": reconciled["rows"], "only_in_api": reconciled["only_in_api"], "retrieved_at": snapshot["retrieved_at"], "api_retrieved_at": snapshot["api_retrieved_at"], "requests": fetcher.requests}, indent=1))
+    report = {"out": args.out, "rows": len(table), "api_rows": reconciled["rows"], "only_in_api": reconciled["only_in_api"], "retrieved_at": snapshot["retrieved_at"], "api_retrieved_at": snapshot["api_retrieved_at"], "requests": fetcher.requests}
+    if args.publish:
+        store = open_store(args, write=True)
+        try:
+            report["commit"] = store.commit({nfip.HARVEST: args.out}, f"Store FEMA's Community Status Book as read on {snapshot['retrieved_at']}, for runs fema.gov refuses")
+        except Superseded as error:
+            print(f"not written: {error}", file=sys.stderr)
+            return 1
+    print(json.dumps(report, indent=1))
     return 0
 
 def main(argv=None):
@@ -397,9 +445,9 @@ def main(argv=None):
     harvest = commands.add_parser("harvest-ny", help="read New York's local-law filings from the Department of State's API into a snapshot file", allow_abbrev=False)
     harvest.add_argument("--out", required=True, help="where to write the snapshot (gzipped JSON)")
     harvest.set_defaults(handler=cmd_harvest_ny)
-    harvest = commands.add_parser("harvest-nfip", help="read FEMA's Community Status Book and the OpenFEMA file it is checked against into a snapshot file", allow_abbrev=False)
+    harvest = add("harvest-nfip", cmd_harvest_nfip, "read FEMA's Community Status Book and the OpenFEMA file it is checked against into a snapshot file")
     harvest.add_argument("--out", required=True, help="where to write the snapshot (a zip)")
-    harvest.set_defaults(handler=cmd_harvest_nfip)
+    harvest.add_argument("--publish", action="store_true", help=f"also store the snapshot as {nfip.HARVEST} in the dataset, for scheduled runs that fema.gov refuses to build from; run it where fema.gov answers")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     for noisy in ("httpx", "httpcore", "huggingface_hub"):

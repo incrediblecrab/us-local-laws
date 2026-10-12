@@ -301,7 +301,7 @@ def verify(store, fetcher=None, stated_rows=None):
     listed = set(store.list_files())
     for path in sorted(expected - listed):
         problems.append(f"{path} is in the manifest but not in the repo")
-    for path in sorted(listed - expected - set(HUB_FILES)):
+    for path in sorted(listed - expected - set(HUB_FILES) - {nfip.HARVEST}):
         problems.append(f"{path} is in the repo but not in the manifest")
     sha256s = store.file_sha256s(sorted(set(entries) & listed))
     for path, entry in sorted(entries.items()):

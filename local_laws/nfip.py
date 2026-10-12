@@ -31,6 +31,8 @@ CRS_SAYS = "a voluntary incentive program that recognizes and encourages communi
 REUSE_SAYS = "Most material on FEMA.gov is free of copyright and may be copied and distributed without permission."
 # Where each build stores the two files it read from fema.gov, as harvest-nfip saves them, so that a run fema.gov refuses can build the table from them again; see cli.read_fema.
 SNAPSHOT = "sources/nfip_snapshot.zip"
+# Where `harvest-nfip --publish`, run on a machine fema.gov answers, stores a newer reading for a run fema.gov refuses to build from; the build checks it as it checks any harvest, then stores it as SNAPSHOT.
+HARVEST = "sources/nfip_harvest.zip"
 # Allow four scheduled refresh opportunities before an unreadable source fails the final freshness check.
 MAX_UNVERIFIED_HOURS = 48
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)

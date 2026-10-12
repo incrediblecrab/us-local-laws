@@ -461,3 +461,85 @@ def test_stored_fema_files_that_are_not_the_manifests_reading_stop_the_run(tmp_p
     assert run("run", "--local", str(out), "--ny-snapshot", later_new_york(tmp_path)) == cli.STOPPED
     assert f"stopped, nothing written: {stop}" in capsys.readouterr().err
     assert (out / MANIFEST).read_text() == published
+
+
+def harvested(**changes):
+    """The NFIP samples as harvest-nfip --publish stores them, read a day after the published build unless changes say otherwise."""
+    return nfip_snapshot() | {"retrieved_at": "2026-09-27T08:18:00Z", "api_retrieved_at": "2026-09-27T08:23:00Z"} | changes
+
+
+def test_harvest_nfip_publish_stores_the_checked_reading_where_refused_runs_look(tmp_path, offline, monkeypatch, capsys):
+    clock = iter(["2026-09-27T08:18:00Z", "2026-09-27T08:23:00Z"])
+    monkeypatch.setattr(nfip, "now", lambda: next(clock))
+    out, hub = tmp_path / "nfip.zip", tmp_path / "hub"
+    assert run("harvest-nfip", "--out", str(out), "--local", str(hub), "--publish") == 0
+    assert json.loads(capsys.readouterr().out)["commit"] is not None
+    assert nfip.load(hub / nfip.HARVEST) == harvested()
+    monkeypatch.setattr(nfip, "now", lambda: "2026-09-27T09:00:00Z")
+    monkeypatch.setattr(cli, "Fetcher", lambda: FakeFetcher({nfip.CSV_URL: b"<html>"}))
+    assert run("harvest-nfip", "--out", str(tmp_path / "bad.zip"), "--local", str(tmp_path / "other"), "--publish") == cli.STOPPED
+    assert not (tmp_path / "other" / nfip.HARVEST).exists(), "a reading that does not parse is not published"
+
+
+def test_a_run_fema_refuses_builds_from_a_newer_harvest_and_freshness_counts_it(tmp_path, offline, monkeypatch, capsys, snapshot, flood):
+    out = tmp_path / "out"
+    assert run("run", "--local", str(out), "--ny-snapshot", snapshot, "--nfip-snapshot", flood) == 0
+    nfip.save(harvested(), out / nfip.HARVEST)
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "Fetcher", lambda: FakeFetcher({nfip.CSV_URL: fema_403()}))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    assert run("run", "--local", str(out), "--ny-snapshot", snapshot) == 0
+    assert f"Building nfip_communities from {nfip.HARVEST}, FEMA's files as read on 2026-09-27T08:18:00Z." in capsys.readouterr().out
+    manifest = json.loads((out / MANIFEST).read_text())
+    assert (manifest["sources"]["nfip_communities"]["retrieved_at"], manifest["sources"]["nfip_communities"]["api"]["retrieved_at"]) == ("2026-09-27T08:18:00Z", "2026-09-27T08:23:00Z")
+    assert nfip.load(out / nfip.SNAPSHOT) == harvested(), "the build stores the reading it built from"
+    assert run("verify", "--local", str(out)) == 0, "the harvest file is allowed beside the manifest's files"
+    capsys.readouterr()
+    monkeypatch.setattr(nfip, "now", lambda: "2026-09-28T08:00:00Z")
+    assert run("check-freshness", "--local", str(out)) == 0
+    report, _ = json.JSONDecoder().raw_decode(capsys.readouterr().out)
+    assert (report["status"], report["verified_by"]) == ("current", {"path": nfip.HARVEST, "retrieved_at": "2026-09-27T08:18:00Z"})
+    monkeypatch.setattr(nfip, "now", lambda: "2026-09-29T08:24:00Z")
+    assert run("check-freshness", "--local", str(out)) == 1, "a harvest older than the limit verifies nothing"
+    report, _ = json.JSONDecoder().raw_decode(capsys.readouterr().out)
+    assert report["status"] == "stale" and "verified_by" not in report
+
+
+def test_a_run_fema_refuses_keeps_the_stored_reading_over_an_older_harvest(tmp_path, offline, monkeypatch, capsys, snapshot, flood):
+    out = tmp_path / "out"
+    assert run("run", "--local", str(out), "--ny-snapshot", snapshot, "--nfip-snapshot", flood) == 0
+    nfip.save(harvested(retrieved_at="2026-09-25T08:18:00Z", api_retrieved_at="2026-09-25T08:23:00Z"), out / nfip.HARVEST)
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "Fetcher", lambda: FakeFetcher({nfip.CSV_URL: fema_403()}))
+    assert run("run", "--local", str(out), "--ny-snapshot", later_new_york(tmp_path)) == 0
+    assert f"Building nfip_communities from {nfip.SNAPSHOT}, FEMA's files as read on 2026-09-26T08:18:00Z." in capsys.readouterr().out
+
+
+def test_a_harvest_that_is_not_a_snapshot_stops_a_refused_run(tmp_path, offline, monkeypatch, capsys, snapshot, flood):
+    out = tmp_path / "out"
+    assert run("run", "--local", str(out), "--ny-snapshot", snapshot, "--nfip-snapshot", flood) == 0
+    (out / nfip.HARVEST).write_bytes(b"not a zip")
+    published = (out / MANIFEST).read_text()
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "Fetcher", lambda: FakeFetcher({nfip.CSV_URL: fema_403()}))
+    assert run("run", "--local", str(out), "--ny-snapshot", later_new_york(tmp_path)) == cli.STOPPED
+    assert f"SourceChanged: {nfip.HARVEST} cannot be read as a snapshot" in capsys.readouterr().err
+    assert (out / MANIFEST).read_text() == published
+
+
+@pytest.mark.parametrize("reading, changed, needed, status", [
+    ("2026-09-27T08:18:00Z", True, True, "changed"),
+    ("2026-09-27T08:18:00Z", False, False, "unchanged"),
+    ("2026-09-26T08:18:00Z", True, False, "unavailable"),
+])
+def test_probe_compares_a_newer_harvest_when_fema_refuses(published, offline, monkeypatch, capsys, reading, changed, needed, status):
+    store, _ = published
+    snapshot = harvested(retrieved_at=reading, api_retrieved_at=reading)
+    if changed:
+        snapshot["csv"] += b"\n"
+    nfip.save(snapshot, store.root / nfip.HARVEST)
+    monkeypatch.setattr(cli, "nfip_head", lambda fetcher: (_ for _ in ()).throw(fema_403()))
+    assert run("probe", "--local", str(store.root)) == 0
+    report = output_json(capsys.readouterr().out)
+    assert (report["needed"], report["sources"]["nfip"]["status"]) == (needed, status)
+    assert (report["head"]["nfip"] or {}).get("via") == (nfip.HARVEST if status != "unavailable" else None)
