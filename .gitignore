@@ -10,3 +10,10 @@ dist/
 /probe.json
 /run.json
 /verify.json
+
+# Local environment files can hold credentials; committed templates stay tracked.
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.sample
