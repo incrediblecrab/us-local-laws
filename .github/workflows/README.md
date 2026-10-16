@@ -1,6 +1,6 @@
 # workflows
 
-**Objective:** keep the Hugging Face dataset current with no personal device and no stored Hugging Face token. The workflow runs at 14:00 UTC (9:00 EST, 10:00 EDT).
+**Objective:** keep the Hugging Face dataset current with no personal device and no stored Hugging Face token. The workflow is scheduled at 09:37 UTC so that it starts near 14:00 UTC (9:00 EST, 10:00 EDT), because GitHub starts runs late. From September 27 to October 15, 2026 GitHub started every one of the 208 scheduled runs of the four dataset pipelines in this account late, by 2.4 to 9.2 hours, and the 18 daily runs scheduled at 14:00 UTC from October 13 by 3.9 to 6.2 hours, so the cron asks for 09:37 UTC to have them start near 14:00 UTC. A run GitHub starts on time starts at 09:37 UTC (4:37 EST, 5:37 EDT).
 
 **Inputs:** GitHub's OIDC token, which Hugging Face exchanges for a one-hour dataset-scoped write token when the Hub dataset has this repository, branch and `pipeline.yml` registered as a Trusted Publisher. No `HF_TOKEN` secret is used.
 
